@@ -3,17 +3,13 @@ import { readFileSync } from 'fs';
 import config from './config';
 import connection from './controller';
 
-// Utils docs:
-//  - https://github.com/mscdex/ssh2/blob/master/README.md
-//  - https://github.com/mscdex/ssh2/blob/master/SFTP.md
-
 const serverConfig: ServerConfig = {
   hostKeys: [
     readFileSync(config.hostPrivateKeyFilePath),
     // { key: readFileSync(config.hostPrivateKeyFilePath), passphrase: '' },
   ],
   banner: 'Upload-only server. Symlink-related actions are not supported.',
-  ident: 'ServerName-SSH2-Nodejs'
+  ident: 'Home-SFTP-Server-Nodejs'
 }
 const server = new Server(serverConfig, connection);
 
