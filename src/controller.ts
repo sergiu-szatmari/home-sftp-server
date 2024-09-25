@@ -22,7 +22,25 @@ import { OpenFileManagement, SFTPEvent, STATUS_CODE } from './model';
 
 const { allowedUser, allowedPassword } = config;
 
-class SFTPStreamControlller {
+// ---------- Types ---------- //
+interface SFTPStream {
+  onOpen: (sftp: SFTPWrapper) => (reqId: number, filename: string, flags: number, attr: Attributes) => Promise<void>;
+  onClose: (sftp: SFTPWrapper) => (reqId: number, handler: Buffer) => Promise<void>;
+  onReadDir: (sftp: SFTPWrapper) => (reqId: number, handle: Buffer) => Promise<void>;
+  onRealPath: (sftp: SFTPWrapper) => (reqId: number, requestedPath: string) => Promise<void>;
+  onOpenDir: (sftp: SFTPWrapper) => (reqId: number, path: string) => Promise<void>;
+  onWrite: (sftp: SFTPWrapper) => (reqId: number, handle: Buffer, offset: number, data: Buffer) => Promise<void>;
+  onSetStat: (sftp: SFTPWrapper) => (reqId: number, filePath: string, attrs: Attributes) => Promise<void>;
+  onMkDir: (sftp: SFTPWrapper) => (reqId: number, path: string, attrs: Attributes) => Promise<void>;
+  onRename: (sftp: SFTPWrapper) => (reqId: number, oldPath: string, newPath: string) => Promise<void>;
+  onRemove: (sftp: SFTPWrapper) => (reqId: number, path: string) => Promise<void>;
+  onSymlink: (sftp: SFTPWrapper) => (reqId: number, linkPath: string, targetPath: string) => void;
+  onReadLink: (sftp: SFTPWrapper) => (reqId: number, path: string) => void;
+  onRead: (sftp: SFTPWrapper) => (reqId: number, handle: Buffer, offset: number, length: number) => Promise<void>;
+}
+// --------------------------- //
+
+class SFTPStreamControlller implements SFTPStream {
   protected openFiles: OpenFileManagement = new Map();
   protected handleCount = 0;
 
