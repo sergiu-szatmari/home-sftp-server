@@ -8,6 +8,7 @@ import {
 } from 'fs';
 import {
   stat as fspStat,
+  lstat as fspLStat,
   chmod as fspChmod,
   chown as fspChown,
   utimes as fspUtimes,
@@ -37,6 +38,10 @@ interface SFTPStream {
   onSymlink: (sftp: SFTPWrapper) => (reqId: number, linkPath: string, targetPath: string) => void;
   onReadLink: (sftp: SFTPWrapper) => (reqId: number, path: string) => void;
   onRead: (sftp: SFTPWrapper) => (reqId: number, handle: Buffer, offset: number, length: number) => Promise<void>;
+  onStat: (sftp: SFTPWrapper) => (reqId: number, path: string) => Promise<void>;
+  onFStat: (sftp: SFTPWrapper) => (reqId: number, handle: Buffer) => Promise<void>;
+  onFSetStat: (sftp: SFTPWrapper) => (reqId: number, handle: Buffer, attrs: Attributes) => Promise<void>;
+  onLStat: (sftp: SFTPWrapper) => (reqId: number, path: string) => Promise<void>;
 }
 // --------------------------- //
 
@@ -598,6 +603,165 @@ class SFTPStreamControlller implements SFTPStream {
       });
     };
   };
+
+  // STAT - Triggered when the SFTP client requests the attributes/metadata for a file/directory
+  public onStat = (sftp: SFTPWrapper) => {
+    return async (reqId: number, path: string) => {
+      console.log(`[STAT] reqId=${reqId}; path="${path}"`);
+
+      try {
+        // Path normalization
+        path = pathNormalize(path);
+        const fullPath = pathJoin(this._ROOT, path);
+        console.log(`[STAT] Normalized path="${path}"; fullPath="${fullPath}"`);
+
+        // Check if file/dir exists
+        const isPathValid = fspExistsSync(fullPath);
+        if (!isPathValid) {
+          console.log(`[STAT] Invalid path -- file not found at "${path}" (fullPath="${fullPath}")`);
+          return sftp.status(reqId, STATUS_CODE.NO_SUCH_FILE);
+        }
+
+        // Get file/dir stats && compose attributes response object
+        const stats = await fspStat(fullPath);
+        const attrs: Attributes = {
+          mode: stats.mode,
+          uid: stats.uid,
+          gid: stats.gid,
+          size: stats.size,
+          atime: stats.atimeMs,
+          mtime: stats.mtimeMs
+        };
+
+        // Return attributes to client
+        return sftp.attrs(reqId, attrs)
+      } catch (err) {
+        console.log(`[STAT] Error occurred`);
+        console.error(err);
+        return sftp.status(reqId, STATUS_CODE.FAILURE);
+      }
+    };
+  };
+
+  // FSTAT - Similar to STAT, but works with a FileHandle instead of path; Triggered when the SFTP client requests the attributes/metadata for a file/directory
+  public onFStat = (sftp: SFTPWrapper) => {
+    return async (reqId: number, handle: Buffer) => {
+      try {
+        // Read/extract the HandleId from the buffer
+        const handleId = handle.readUInt32BE(0);
+        const openFileEntry = this.openFiles.get(handleId);
+        
+        if (!openFileEntry) {
+          console.log(`[FSTAT] Invalid handle; reqId=${reqId}, handleId=${handleId}`);
+          return sftp.status(reqId, STATUS_CODE.NO_SUCH_FILE);
+        }
+        
+        const { fullPath } = openFileEntry;
+        console.log(`[FSTAT] reqId=${reqId}; handleId=${handleId}; fullPath="${fullPath}"`);
+        
+
+        // Get file/dir stats && compose attributes response object
+        const stats = await fspStat(fullPath);
+        const attrs: Attributes = {
+          mode: stats.mode,
+          uid: stats.uid,
+          gid: stats.gid,
+          size: stats.size,
+          atime: stats.atimeMs,
+          mtime: stats.mtimeMs
+        };
+
+        // Return attributes to client
+        return sftp.attrs(reqId, attrs);
+      } catch (err) {
+        console.log(`[FSTAT] Error occurred`);
+        console.error(err);
+        return sftp.status(reqId, STATUS_CODE.FAILURE);
+      }
+    };
+  };
+
+  // FSETSTAT - Similar to SETSTAT, but works with a FileHandle instead of a path; Triggered when the SFTP client attempts to set/update the file metadata (permissions, ownership and/or timestamps)
+  public onFSetStat = (sftp: SFTPWrapper) => {
+    return async (reqId: number, handle: Buffer, attrs: Attributes) => {
+      try {
+        // Read/extract the HandleId from the buffer
+        const handleId = handle.readUInt32BE(0);
+        const openFileEntry = this.openFiles.get(handleId);
+        
+        if (!openFileEntry) {
+          console.log(`[FSETSTAT] Invalid handle; reqId=${reqId}, handleId=${handleId}`);
+          return sftp.status(reqId, STATUS_CODE.NO_SUCH_FILE);
+        }
+        
+        const { fullPath } = openFileEntry;
+        console.log(`[FSETSTAT] reqId=${reqId}; handleId=${handleId}; fullPath="${fullPath}"; attrs=${JSON.stringify(attrs)}`);
+        
+
+        // Set permissions if provided
+        if (attrs.mode !== undefined) {
+          await fspChmod(fullPath, attrs.mode);
+        }
+
+        // Set ownership if provided
+        if (attrs.uid !== undefined && attrs.gid !== undefined) {
+          await fspChown(fullPath, attrs.uid, attrs.gid);
+        }
+
+        // Set timestamps if provided
+        if (attrs.atime !== undefined && attrs.mtime !== undefined) {
+          await fspUtimes(fullPath, attrs.atime, attrs.mtime);
+        }
+
+        // Send success response to SFTP client
+        return sftp.status(reqId, STATUS_CODE.OK);
+      } catch (err) {
+        console.log(`[FSETSTAT] Error occurred`);
+        console.error(err);
+        return sftp.status(reqId, STATUS_CODE.FAILURE);
+      }
+    };
+  };
+
+  // LSTAT - Triggered when the SFTP client requests the attributes/metadata for a file/directory SYMLINK, not the file/dir itself
+  public onLStat = (sftp: SFTPWrapper) => {
+    return async (reqId: number, path: string) => {
+      console.log(`[LSTAT] reqId=${reqId}, path="${path}"`);
+
+      try {
+        // Path normalization
+        path = pathNormalize(path);
+        const fullPath = pathJoin(this._ROOT, path);
+        console.log(`[LSTAT] Normalized path="${path}" (fullPath="${fullPath}")`);
+
+        // Check if path is valid
+        const isPathValid = fspExistsSync(fullPath);
+        if (!isPathValid) {
+          console.log(`[LSTAT] No file found, invalid path "${path}" (fullPath="${fullPath}")`);
+          return sftp.status(reqId, STATUS_CODE.NO_SUCH_FILE);
+        }
+        
+        // Get symlink stats
+        const stats = await fspLStat(fullPath);
+        const attrs: Attributes = {
+          mode: stats.mode,
+          uid: stats.uid,
+          gid: stats.gid,
+          size: stats.size,
+          atime: stats.atimeMs,
+          mtime: stats.mtimeMs
+        };
+
+        // Return attributes to client
+        return sftp.attrs(reqId, attrs);
+      } catch (err) {
+        console.log(`[LSTAT] Error occurred`);
+        console.error(err);
+        return sftp.status(reqId, STATUS_CODE.FAILURE);
+      }
+    };
+  };
+
 }
 
 class ConnectionController {
@@ -687,7 +851,7 @@ class ConnectionController {
       // WRITE - Triggered when the SFTP client attempts writing content to a file
       sftp.on(SFTPEvent.WRITE, this.sftpStream.onWrite(sftp));
 
-      // SETSTAT - Triggered after an SFTP client creates/updates a file and attempts to set/update the permissions and/or timestamps
+      // SETSTAT - Triggered when the SFTP client attempts to set/update the file metadata (permissions, ownership and/or timestamps)
       sftp.on(SFTPEvent.SETSTAT, this.sftpStream.onSetStat(sftp));
 
       // MKDIR - Triggered when SFTP client attempts to create a new directory on the SFTP server
@@ -712,16 +876,18 @@ class ConnectionController {
       // READ - Triggered when the SFTP client requests a chunk of data from a file (in order to copy a file FROM server to remote client?)
       sftp.on(SFTPEvent.READ, this.sftpStream.onRead(sftp));
 
-      // TODO: Review+clean on.OPEN......
+      // STAT - Triggered when the SFTP client requests the attributes/metadata for a file/directory
+      sftp.on(SFTPEvent.STAT, this.sftpStream.onStat(sftp));
+
+      // FSTAT - Similar to STAT, but works with a FileHandle instead of path; Triggered when the SFTP client requests the attributes/metadata for a file/directory
+      sftp.on(SFTPEvent.FSTAT, this.sftpStream.onFStat(sftp));
       
-      // TODO: What is (*)STAT ??
-      
-      // ???? What's the difference
-      // FSETSTAT - Similar to SETSTAT
-      // FSTAT - Triggered when the SFTP client requests the attributes for a certain file/dir
-      // STAT - Triggered when the SFTP client requests the attributes for a certain file/dir
-      // LSTAT - Triggered when the SFTP client requests the attributes for a certain file/dir
-    })
+      // FSETSTAT - Similar to SETSTAT, but works with a FileHandle instead of a path; Triggered when the SFTP client attempts to set/update the file metadata (permissions, ownership and/or timestamps)
+      sftp.on(SFTPEvent.FSETSTAT, this.sftpStream.onFSetStat(sftp));
+
+      // LSTAT - Triggered when the SFTP client requests the attributes/metadata for a file/directory SYMLINK, not the file/dir itself
+      sftp.on(SFTPEvent.LSTAT, this.sftpStream.onLStat(sftp));
+    });
   }
 }
 
@@ -739,5 +905,5 @@ export default (client: Connection, info: ClientInfo) => {
   client.on('ready', () => {
     console.log('Client authenticated');
     client.on('session', controller.onSession)
-  })
+  });
 }
