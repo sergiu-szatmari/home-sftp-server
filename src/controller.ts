@@ -5,6 +5,7 @@ import {
   existsSync as fspExistsSync,
   createWriteStream as fspCreateWriteStream,
   createReadStream as fspCreateReadStream,
+  constants as fsConstants,
 } from 'fs';
 import {
   stat as fspStat,
@@ -15,13 +16,15 @@ import {
   readdir as fspReaddir,
   mkdir as fspMkdir,
   rename as fspRename,
-  unlink as fspUnlink
+  rm as fspRm
 } from 'fs/promises';
 
 import config from './config';
 import { OpenFileManagement, SFTPEvent, STATUS_CODE } from './model';
+import { DIR_PERMISSIONS, getModeConvertor, ModeConversion, Mutex } from './utils';
 
-const { allowedUser, allowedPassword } = config;
+const { allowedUser, allowedPassword, } = config;
+
 
 // ---------- Types ---------- //
 interface SFTPStream {
@@ -50,6 +53,7 @@ class SFTPStreamControlller implements SFTPStream {
   protected handleCount = 0;
 
   private _ROOT = config.dataDirParent;
+  private readDirMutex = new Mutex();
 
   protected debug() {
     const entries: string[] = [];
@@ -188,53 +192,72 @@ class SFTPStreamControlller implements SFTPStream {
 
   // READDIR - Triggered when the SFTP client asks for a directory listing
   public onReadDir = (sftp: SFTPWrapper) => {
+    // Disclaimer:
+    //    Filezilla emits a few READDIR events concurrently. This behaviour makes the directory listing to have each file displayed [EMIT COUNT] amount of times.
+    //    To fix this behaviour, we use a Mutex. This limits the function execution to only one event handler at a time.
     return async (reqId: number, handle: Buffer) => {
+      // Acquire mutex lock
+      const releaseMutex = await this.readDirMutex.lock();
+
       // Read/extract the HandleId from the buffer
       const handleId = handle.readUInt32BE(0);
       const openFileEntry = this.openFiles.get(handleId);
+      console.log(`[READDIR] reqId=${reqId}; handleId=${handleId}; entry.offset=${openFileEntry?.offset}`)
       
       if (!openFileEntry || !openFileEntry.isDirectory) {
         console.log(`[READDIR] Invalid directory handle; reqId=${reqId}, handleId=${handleId}, path=${openFileEntry?.path}`);
+        releaseMutex(); // Release mutex lock
         return sftp.status(reqId, STATUS_CODE.NO_SUCH_FILE);
-        // return sftp.status(reqId, STATUS_CODE.FAILURE);
       }
-
-      // Check if directory wasn't listed before (to prevent an infinite READDIR emit)
-      const { files, offset } = openFileEntry;
       
-      // If no more files to send
-      if (offset >= files.length) {
-        console.log(`[READDIR] End of listing (from before)`);
-        return sftp.status(reqId, STATUS_CODE.EOF);
+      try {
+        // Check if directory wasn't listed before (to prevent an infinite READDIR emit)
+        const { files, offset } = openFileEntry;
+        
+        // If no more files to send
+        if (offset >= files.length) {
+          console.log(`[READDIR] End of listing (from before)`);
+          releaseMutex(); // Release mutex lock
+          return sftp.status(reqId, STATUS_CODE.EOF);
+        }
+        
+        // Compose batch of entries & get stats for each file to be sent
+        const batchSize = 10;
+        const entries = await Promise.all(
+          files
+            .slice(offset, offset + batchSize)
+            .map(async (file): Promise<FileEntry> => {
+              // Compute full path, relative to "openFileEntry.fullPath"
+              const fullPath = pathJoin(openFileEntry.fullPath, file);
+              
+              // Get stats for every file
+              const stats = await fspStat(fullPath);
+              const { mode, uid, gid, size, atimeMs: atime, mtimeMs: mtime } = stats;
+              
+              const convertMode = getModeConvertor(ModeConversion.fs2sftp);
+              const sftpMode = convertMode(mode); 
+
+              const attrs: Attributes = { mode: sftpMode, uid, gid, size, atime, mtime }; 
+              return { filename: file, longname: '', attrs };
+            })
+        );
+
+        console.log(`[READDIR] Listing directory "${openFileEntry.path}": ${JSON.stringify(entries)}]`);
+
+        // Update offset for the next READDIR handler
+        openFileEntry.offset += entries.length;
+        
+        // Release mutex lock
+        releaseMutex();
+        
+        // Send files
+        return sftp.name(reqId, entries);
+      } catch (err) {
+        console.log(`[READDIR] Error occurred`);
+        console.error(err);
+        releaseMutex(); // Release mutex lock
+        return sftp.status(reqId, STATUS_CODE.FAILURE);
       }
-
-      // Compose batch of entries & get stats for each file to be sent
-      // refactor cu for-const ???
-      const batchSize = 10;
-      const entries = await Promise.all(
-        files
-          .slice(offset, offset + batchSize)
-          .map(async (file): Promise<FileEntry> => {
-
-            // Compute full path, relative to "openFileEntry.fullPath"
-            const fullPath = pathJoin(openFileEntry.fullPath, file);
-            
-            // Get stats for every file
-            const stats = await fspStat(fullPath);
-
-            const { mode, uid, gid, size, atimeMs: atime, mtimeMs: mtime } = stats;
-            const attrs: Attributes = { mode, uid, gid, size, atime, mtime } 
-
-            return { filename: file, longname: '', attrs };
-          })
-      );
-      console.log(`[READDIR] Listing directory "${openFileEntry.path}": ${JSON.stringify(entries)}]`);
-
-      // Update offset for the next READDIR handler
-      openFileEntry.offset += entries.length;
-
-      // Send files
-      return sftp.name(reqId, entries);
     };
   };
 
@@ -270,9 +293,12 @@ class SFTPStreamControlller implements SFTPStream {
         // Getting attributes for the path
         const stats = await fspStat(fullPath);
 
+        const convertMode = getModeConvertor(ModeConversion.fs2sftp);
+        const sftpMode = convertMode(stats.mode);
+
         // If path exists, prepare the attributes object to be sent to SFTP client
         const attrs: Attributes = {
-          mode: stats.mode,
+          mode: sftpMode,
           uid: stats.uid,
           gid: stats.gid,
           size: stats.size,
@@ -386,17 +412,24 @@ class SFTPStreamControlller implements SFTPStream {
         
         // Check if file exists and get current stats
         const stats = await fspStat(fullPath);
-        
-        const mode = attrs.mode || stats.mode;
-        const uid = attrs.uid || stats.uid;
-        const gid = attrs.gid || stats.gid;
-        const atime = attrs.atime || stats.atime;
-        const mtime = attrs.mtime || stats.mtime;
-        
-        // Set directory attributes:
-        await fspChmod(fullPath, mode); // permissions
-        await fspChown(fullPath, uid, gid); // ownership
-        await fspUtimes(fullPath, atime, mtime) // timestamps
+        const { mode, uid, gid, atime, mtime } = stats;
+
+        // Set permissions if provided
+        if (mode !== undefined) {
+          const convertMode = getModeConvertor(ModeConversion.sftp2fs);
+          const fsMode = convertMode(mode);
+          await fspChmod(fullPath, fsMode);
+        }
+
+        // Set ownership if provided
+        if (uid !== undefined && gid !== undefined) {
+          await fspChown(fullPath, uid, gid);
+        }
+
+        // Set timestamps if provided
+        if (atime !== undefined && mtime !== undefined) {
+          await fspUtimes(fullPath, atime, mtime);
+        }
 
         // Send success response to SFTP client
         return sftp.status(reqId, STATUS_CODE.OK);
@@ -427,14 +460,24 @@ class SFTPStreamControlller implements SFTPStream {
           return sftp.status(reqId, STATUS_CODE.FAILURE);
         }
 
-        await fspMkdir(fullPath, 0o755);
+        let fsMode = 0;
+        if (attrs.mode !== undefined) {
+          // Convert mode if provided by sftp client
+          const convertMode = getModeConvertor(ModeConversion.sftp2fs);
+          fsMode = convertMode(attrs.mode);
+        } else {
+          // Default value if nothing was provided
+          fsMode = DIR_PERMISSIONS | fsConstants.S_IFDIR;
+        }
+
+        await fspMkdir(fullPath, fsMode);
         if (!fspExistsSync(fullPath)) {
           console.log(`[MKDIR] Creating directory failed at path "${path}" (full path: "${fullPath}")`);
           return sftp.status(reqId, STATUS_CODE.FAILURE);
         }
 
         // Set directory attributes:
-        await fspChmod(fullPath, 0o755); // permissions
+        await fspChmod(fullPath, fsMode); // permissions
         await fspChown(fullPath, process.getuid!(), process.getgid!()); // ownership
         await fspUtimes(fullPath, Date.now(), Date.now()) // timestamps
 
@@ -513,8 +556,7 @@ class SFTPStreamControlller implements SFTPStream {
         }
 
         // Attempt to delete file
-        await fspUnlink(fullPath);
-        // await fsRemove(fullPath);
+        await fspRm(fullPath, { force: true, recursive: true });
 
         // Check if file was truly removed (since fs.remove/fs.unlink don't return any success status)
         isFilePresesent = fspExistsSync(fullPath);
@@ -624,8 +666,12 @@ class SFTPStreamControlller implements SFTPStream {
 
         // Get file/dir stats && compose attributes response object
         const stats = await fspStat(fullPath);
+        
+        const convertMode = getModeConvertor(ModeConversion.fs2sftp);
+        const sftpMode = convertMode(stats.mode);
+        
         const attrs: Attributes = {
-          mode: stats.mode,
+          mode: sftpMode,
           uid: stats.uid,
           gid: stats.gid,
           size: stats.size,
@@ -662,8 +708,12 @@ class SFTPStreamControlller implements SFTPStream {
 
         // Get file/dir stats && compose attributes response object
         const stats = await fspStat(fullPath);
+        
+        const convertMode = getModeConvertor(ModeConversion.fs2sftp);
+        const sftpMode = convertMode(stats.mode);
+        
         const attrs: Attributes = {
-          mode: stats.mode,
+          mode: sftpMode,
           uid: stats.uid,
           gid: stats.gid,
           size: stats.size,
@@ -700,7 +750,9 @@ class SFTPStreamControlller implements SFTPStream {
 
         // Set permissions if provided
         if (attrs.mode !== undefined) {
-          await fspChmod(fullPath, attrs.mode);
+          const convertMode = getModeConvertor(ModeConversion.sftp2fs);
+          const fsMode = convertMode(attrs.mode);
+          await fspChmod(fullPath, fsMode);
         }
 
         // Set ownership if provided
