@@ -115,4 +115,9 @@ export function runPrerequisiteActions() {
     if (!isDirectoryPresent) throw new Error(`Failed to create data directory at "${dataDirFullPath}"`);
     else console.log(`[Prerequisites] Successfully created data directory`);
   }
+
+  // 4. Ensure private key file exists at given path
+  const isPrivateKeyFilePresent = fsExistsSync(config.hostPrivateKeyFilePath);
+  if (!isPrivateKeyFilePresent) throw new Error(`Private key file does not exist at path "${config.hostPrivateKeyFilePath}".`);
+  else console.log(`[Prerequsites] Private key file exists at path "${config.hostPrivateKeyFilePath}"`);
 }
