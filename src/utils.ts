@@ -1,4 +1,10 @@
-import { constants as fsConstants } from 'fs';
+import {
+  constants as fsConstants,
+  existsSync as fsExistsSync,
+  mkdirSync as fsMkDirSync,
+} from 'fs';
+import config from './config';
+import { join as pathJoin } from 'path';
 
 // Directory permissions ==> "rwx|r-x|r-x"
 export const DIR_PERMISSIONS = 0o755;
@@ -77,5 +83,36 @@ export class Mutex {
 
       await currentMutex; // Wait for the previous lock to be released
       return release!; // Return the release function
+  }
+}
+
+// Things to be done before the SFTP server is initiated and starts listening
+export function runPrerequisiteActions() {
+
+  // 1. Validate DATA_DIR_PARENT path
+  let isDirectoryPresent = fsExistsSync(config.dataDirParent);
+  if (!isDirectoryPresent) throw new Error(`Path of DATA_DIR_PARENT is invalid "${config.dataDirParent}"`);
+
+  console.log(`[Prerequisites] DATA_PARENT_DIR exists at "${config.dataDirParent}"`);
+
+  // 2. Validate DATA_DIR_PARENT/DATA_DIR path
+  const dataDirFullPath = pathJoin(config.dataDirParent, `/${config.dataDirName}`);
+  console.log(`[Prerequisites] Data directory full path "${dataDirFullPath}"`);
+
+  // 3. Ensure DATA dir
+  isDirectoryPresent = fsExistsSync(dataDirFullPath);
+  if (isDirectoryPresent) {
+    console.log(`[Prerequisites] Data directory exists at path "${dataDirFullPath}"`);
+  } else {
+    console.log(`[Prerequisites] Data directory does not exist at path "${dataDirFullPath}"`);
+    console.log(`[Prerequisites] Creating data directory...`);
+  
+    // Create directory
+    fsMkDirSync(dataDirFullPath, DIR_PERMISSIONS);
+  
+    // Check if directory was created successfully
+    isDirectoryPresent = fsExistsSync(dataDirFullPath);
+    if (!isDirectoryPresent) throw new Error(`Failed to create data directory at "${dataDirFullPath}"`);
+    else console.log(`[Prerequisites] Successfully created data directory`);
   }
 }

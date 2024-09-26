@@ -14,6 +14,12 @@ export default {
   allowedUser: Buffer.from('sergiu'),
   allowedPassword: Buffer.from('password'),
 
-  // Parent of "/data" directory
+  // Name of directory mapped to SFTP file system
+  dataDirName: 'data',
+  
+  // Parent of "/[dataDirName]" directory
   dataDirParent: pathJoin(__dirname, '..'),
+
+  // Skips/creates a web server used for health checks
+  allowWebHealthCheck: false,
 }

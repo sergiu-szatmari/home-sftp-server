@@ -23,32 +23,13 @@ import config from './config';
 import { OpenFileManagement, SFTPEvent, STATUS_CODE } from './model';
 import { DIR_PERMISSIONS, getModeConvertor, ModeConversion, Mutex } from './utils';
 
-const { allowedUser, allowedPassword, } = config;
+const { allowedUser, allowedPassword, dataDirName } = config;
+
+// "/data" or "/data-sftp" or ...
+const dataDirBasePath = `/${dataDirName}`
 
 
-// ---------- Types ---------- //
-interface SFTPStream {
-  onOpen: (sftp: SFTPWrapper) => (reqId: number, filename: string, flags: number, attr: Attributes) => Promise<void>;
-  onClose: (sftp: SFTPWrapper) => (reqId: number, handler: Buffer) => Promise<void>;
-  onReadDir: (sftp: SFTPWrapper) => (reqId: number, handle: Buffer) => Promise<void>;
-  onRealPath: (sftp: SFTPWrapper) => (reqId: number, requestedPath: string) => Promise<void>;
-  onOpenDir: (sftp: SFTPWrapper) => (reqId: number, path: string) => Promise<void>;
-  onWrite: (sftp: SFTPWrapper) => (reqId: number, handle: Buffer, offset: number, data: Buffer) => Promise<void>;
-  onSetStat: (sftp: SFTPWrapper) => (reqId: number, filePath: string, attrs: Attributes) => Promise<void>;
-  onMkDir: (sftp: SFTPWrapper) => (reqId: number, path: string, attrs: Attributes) => Promise<void>;
-  onRename: (sftp: SFTPWrapper) => (reqId: number, oldPath: string, newPath: string) => Promise<void>;
-  onRemove: (sftp: SFTPWrapper) => (reqId: number, path: string) => Promise<void>;
-  onSymlink: (sftp: SFTPWrapper) => (reqId: number, linkPath: string, targetPath: string) => void;
-  onReadLink: (sftp: SFTPWrapper) => (reqId: number, path: string) => void;
-  onRead: (sftp: SFTPWrapper) => (reqId: number, handle: Buffer, offset: number, length: number) => Promise<void>;
-  onStat: (sftp: SFTPWrapper) => (reqId: number, path: string) => Promise<void>;
-  onFStat: (sftp: SFTPWrapper) => (reqId: number, handle: Buffer) => Promise<void>;
-  onFSetStat: (sftp: SFTPWrapper) => (reqId: number, handle: Buffer, attrs: Attributes) => Promise<void>;
-  onLStat: (sftp: SFTPWrapper) => (reqId: number, path: string) => Promise<void>;
-}
-// --------------------------- //
-
-class SFTPStreamControlller implements SFTPStream {
+class SFTPStreamControlller {
   protected openFiles: OpenFileManagement = new Map();
   protected handleCount = 0;
 
@@ -273,17 +254,17 @@ class SFTPStreamControlller implements SFTPStream {
       const realPath = (() => {
         // Case 1: Initial connection to SFTP Server
         //  - SFTP client tries to resolve the 'root' path (sends either "." or "/")
-        //  - The server must "resolve" the root path "/data"
-        if (requestedPath === '.') return '/data';
-        if (requestedPath === '/') return '/data';
+        //  - The server must "resolve" the root path "[dataDirBasePath]"
+        if (requestedPath === '.') return dataDirBasePath;
+        if (requestedPath === '/') return dataDirBasePath;
 
         // Case 2: Subsequest connection to SFTP Server
         //  - SFTP client tries to check if certain path is valid on Server's file system
 
-        // Deny any path above "/data" and fallback to the "root" directory "/data" 
-        if (!requestedPath.startsWith('/data')) return '/data';
+        // Deny any path above "[dataDirBasePath]" and fallback to the "root" directory "[dataDirBasePath]" 
+        if (!requestedPath.startsWith(dataDirBasePath)) return dataDirBasePath;
         
-        // We have ensured that the path is under "/data[/......]"
+        // We have ensured that the path is under "[dataDirBasePath][/......]"
         return requestedPath;
       })();
       const fullPath = pathJoin(this._ROOT, realPath);
